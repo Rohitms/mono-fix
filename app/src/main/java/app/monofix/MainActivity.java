@@ -1,6 +1,7 @@
 package app.monofix;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.*;
 import android.database.Cursor;
 import android.graphics.Typeface;
@@ -21,7 +22,9 @@ import androidx.media3.common.audio.ChannelMixingMatrix;
 import androidx.media3.transformer.*;
 
 import java.io.*;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -31,10 +34,14 @@ public class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private LinearLayout layout;
     private RadioGroup modes;
-    private Button pick, convert, play;
+    private Button pick, convert, play, details;
     private TextView filename, status;
     private ProgressBar progress;
-    private Uri input, result;
+    private final ArrayList<Uri> selection = new ArrayList<>();
+    private final ArrayList<Uri> failed = new ArrayList<>();
+    private final ArrayList<String> report = new ArrayList<>();
+    private int position;
+    private Uri result;
     private String name;
     private boolean busy;
     private Transformer exporter;
@@ -53,11 +60,11 @@ public class MainActivity extends Activity {
         setContentView(scroll);
         label("Mono Fix", 36, true);
         label("Turn one-sided video audio into sound you can hear in both ears.", 17, false);
-        section("Source video");
-        filename = label("Choose a video with stereo audio.", 16, false);
-        pick = button("Choose video", false);
+        section("Source videos");
+        filename = label("Choose one video, or long-press to select several.", 16, false);
+        pick = button("Choose videos", false);
         pick.setOnClickListener(v -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT)
-                .setType("video/*").addCategory(Intent.CATEGORY_OPENABLE), 1));
+                .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true).setType("video/*").addCategory(Intent.CATEGORY_OPENABLE), 1));
         section("Audio to keep");
         modes = new RadioGroup(this);
         layout.addView(modes);
@@ -83,13 +90,18 @@ public class MainActivity extends Activity {
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)); }
             catch (ActivityNotFoundException e) { status.setText("Open the saved video from your Gallery."); }
         });
+        details = button("View results", false);
+        details.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Conversion results")
+                .setItems(report.toArray(new String[0]), null).setPositiveButton("Close", null).show());
         if (state != null) {
-            input = state.getParcelable("input");
+            ArrayList<Uri> restored = state.getParcelableArrayList("selection");
+            if (restored != null) selection.addAll(restored);
+            ArrayList<String> previous = state.getStringArrayList("report");
+            if (previous != null) report.addAll(previous);
             result = state.getParcelable("result");
-            name = state.getString("name");
-            if (name != null) filename.setText(name);
+            filename.setText(state.getCharSequence("caption", filename.getText()));
+            status.setText(state.getCharSequence("status", status.getText()));
             modes.check(modes.getChildAt(state.getInt("mode")).getId());
-            if (result != null) status.setText("Saved in Movies/Mono Fix.");
         }
         refresh();
     }
@@ -123,7 +135,10 @@ public class MainActivity extends Activity {
     private int mode() { return modes.indexOfChild(modes.findViewById(modes.getCheckedRadioButtonId())); }
     private void refresh() {
         pick.setEnabled(!busy);
-        convert.setEnabled(input != null && !busy);
+        convert.setEnabled(!selection.isEmpty() && !busy);
+        convert.setText(selection.size() > 1 ? "Save " + selection.size() + " mono videos" : "Save mono video");
+        play.setText(report.size() > 1 ? "Play last saved video" : "Play saved video");
+        details.setVisibility(!busy && !report.isEmpty() ? View.VISIBLE : View.GONE);
         convert.setAlpha(convert.isEnabled() ? 1f : .45f);
         for (int i = 0; i < modes.getChildCount(); i++) modes.getChildAt(i).setEnabled(!busy);
         play.setVisibility(result != null && !busy ? View.VISIBLE : View.GONE);
@@ -133,31 +148,58 @@ public class MainActivity extends Activity {
     }
     @Override protected void onActivityResult(int request, int code, Intent data) {
         super.onActivityResult(request, code, data);
-        if (request != 1 || code != RESULT_OK || data == null || data.getData() == null) return;
-        input = data.getData();
+        if (request != 1 || code != RESULT_OK || data == null || busy) return;
+        LinkedHashSet<Uri> chosen = new LinkedHashSet<>();
+        ClipData clips = data.getClipData();
+        if (clips != null) {
+            for (int i = 0; i < clips.getItemCount(); i++) chosen.add(clips.getItemAt(i).getUri());
+        }
+        if (data.getData() != null) chosen.add(data.getData());
+        chosen.remove(null);
+        if (chosen.isEmpty()) return;
+        selection.clear();
+        selection.addAll(chosen);
+        report.clear();
         result = null;
-        name = "Video";
-        try (Cursor c = getContentResolver().query(input, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
-            if (c != null && c.moveToFirst() && !c.isNull(0)) name = c.getString(0);
-        } catch (RuntimeException ignored) {}
-        filename.setText(name);
-        status.setText("Saves a new MP4 in Movies/Mono Fix.");
+        updateCaption();
+        status.setText("Saves a new MP4 for each video in Movies/Mono Fix.");
         refresh();
+    }
+    private String displayName(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) return c.getString(0);
+        } catch (RuntimeException ignored) {}
+        return "Video";
+    }
+    private void updateCaption() {
+        filename.setText(selection.size() == 1 ? displayName(selection.get(0)) : selection.size() + " videos selected");
     }
     private void begin() {
         busy = true;
         result = null;
+        position = 0;
+        report.clear();
+        failed.clear();
         refresh();
+        nextVideo();
+    }
+    private void nextVideo() {
+        Uri input = selection.get(position);
+        name = displayName(input);
         progress.setIndeterminate(true);
-        status.setText("Reading video…");
+        progress.setProgress(0);
+        showStage("Reading");
         worker.execute(() -> {
             try {
-                validateSource();
-                runOnUiThread(() -> { if (!isDestroyed() && !isFinishing()) startExport(); });
+                validateSource(input);
+                runOnUiThread(() -> { if (!isDestroyed() && !isFinishing()) startExport(input); });
             } catch (Exception e) { runOnUiThread(() -> finishJob(e)); }
         });
     }
-    private void validateSource() throws IOException {
+    private void showStage(String stage) {
+        status.setText(stage + " " + (position + 1) + " of " + selection.size() + " · " + name);
+    }
+    private void validateSource(Uri input) throws IOException {
         MediaExtractor tracks = new MediaExtractor();
         try {
             tracks.setDataSource(this, input, null);
@@ -176,7 +218,7 @@ public class MainActivity extends Activity {
             if (!video || audio != 1) throw new IOException("Choose a video with one stereo audio track.");
         } finally { tracks.release(); }
     }
-    private void startExport() {
+    private void startExport(Uri input) {
         try {
             int mode = mode();
             ChannelMixingAudioProcessor mix = new ChannelMixingAudioProcessor();
@@ -189,7 +231,7 @@ public class MainActivity extends Activity {
                     .addListener(new Transformer.Listener() {
                         @Override public void onCompleted(Composition c, ExportResult export) {
                             exporter = null;
-                            status.setText("Saving MP4…");
+                            showStage("Saving");
                             progress.setIndeterminate(true);
                             File ready = temporary;
                             temporary = null;
@@ -200,7 +242,7 @@ public class MainActivity extends Activity {
                         }
                     }).build();
             exporter.start(item, temporary.getAbsolutePath());
-            status.setText("Converting audio…");
+            showStage("Converting");
             showProgress();
         } catch (Exception e) { finishJob(e); }
     }
@@ -243,16 +285,45 @@ public class MainActivity extends Activity {
     private void finishJob(Exception e) {
         exporter = null;
         if (temporary != null) { temporary.delete(); temporary = null; }
-        if (isDestroyed()) return;
+        handler.removeCallbacksAndMessages(null);
+        if (isDestroyed() || isFinishing()) return;
+        if (e == null) {
+            report.add(name + " — Saved");
+        } else {
+            failed.add(selection.get(position));
+            report.add(name + " — " + e.getLocalizedMessage());
+        }
+        position++;
+        if (position < selection.size()) {
+            nextVideo();
+            return;
+        }
         busy = false;
-        status.setText(e == null ? "Saved in Movies/Mono Fix." : "Couldn’t convert this video. " + e.getLocalizedMessage());
+        int saved = position - failed.size();
+        String summary = "Saved " + saved + " of " + position + " in Movies/Mono Fix.";
+        if (!failed.isEmpty()) {
+            selection.clear();
+            selection.addAll(failed);
+            updateCaption();
+            summary += " Only unsuccessful clips are selected for retry.";
+        }
+        status.setText(summary);
         refresh();
     }
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
-        state.putParcelable("input", input);
+        ArrayList<Uri> remaining = new ArrayList<>();
+        if (busy) {
+            remaining.addAll(failed);
+            remaining.addAll(selection.subList(position, selection.size()));
+        } else {
+            remaining.addAll(selection);
+        }
+        state.putParcelableArrayList("selection", remaining);
+        state.putStringArrayList("report", new ArrayList<>(report));
         state.putParcelable("result", result);
-        state.putString("name", name);
+        state.putCharSequence("caption", busy ? remaining.size() + " videos selected" : filename.getText());
+        state.putCharSequence("status", busy ? "Conversion was interrupted. Check saved files before retrying." : status.getText());
         state.putInt("mode", mode());
     }
     @Override protected void onDestroy() {
