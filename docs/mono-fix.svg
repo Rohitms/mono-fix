@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 48 48">
+  <title>Mono Fix waveform logo</title>
+  <path fill="#194B47" d="M0 0h48v48H0z"/>
+  <path fill="none" stroke="#BFF888" stroke-width="4" stroke-linecap="round"
+        d="M9 22v4 M16 16v16 M24 10v28 M32 16v16 M39 22v4"/>
+</svg>

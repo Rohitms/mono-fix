@@ -1,3 +1,5 @@
+![Mono Fix waveform logo](docs/mono-fix.svg)
+
 # Mono Fix
 
 Mono Fix is an Android 10+ app for videos with sound in only one ear. It converts a single stereo audio track to mono on the device and saves a new MP4 under `Movies/Mono Fix/`.
