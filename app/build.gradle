@@ -1,0 +1,13 @@
+plugins { id 'com.android.application' version '8.7.3' }
+android {
+    namespace 'app.monofix'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'app.monofix'
+        minSdk 29
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+}
+dependencies { implementation 'androidx.media3:media3-transformer:1.6.1' }
